@@ -2,7 +2,7 @@
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="theme-color" content="#000000">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -248,9 +248,10 @@ function grabRoi() {
   const sw = roi.width / scale, sh = roi.height / scale;
   if (facing === 'user') sx = vw - sx - sw; // camera trước đang hiển thị lật gương
 
-  const up = sw < 1000 ? 2 : 1;
+  // ~1000px chiều ngang là đủ nét cho OCR; ảnh lớn hơn chỉ làm điện thoại chậm đi nhiều lần
+  const k = Math.min(2, 1000 / sw);
   const c = document.createElement('canvas');
-  c.width = Math.round(sw * up); c.height = Math.round(sh * up);
+  c.width = Math.round(sw * k); c.height = Math.round(sh * k);
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
   const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
@@ -287,13 +288,14 @@ async function recognize(source) {
   }
 }
 
-$('snap').onclick = () => recognize(grabRoi());
+const snap = () => { if (video.videoWidth) recognize(grabRoi()); };
+$('snap').onclick = () => (video.videoWidth ? snap() : toast('Camera chưa sẵn sàng'));
 
 $('auto').onclick = () => {
   const on = $('auto').getAttribute('aria-pressed') !== 'true';
   $('auto').setAttribute('aria-pressed', on);
   clearInterval(autoTimer);
-  if (on) { autoTimer = setInterval(() => { if (!busy) recognize(grabRoi()); }, 1200); toast('Đang quét liên tục'); }
+  if (on) { autoTimer = setInterval(() => { if (!busy) snap(); }, 1200); toast('Đang quét liên tục'); }
   else toast('Đã tắt quét liên tục');
 };
 

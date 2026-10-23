@@ -8,6 +8,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Camera OCR</title>
+<!-- GitHub Pages không đặt được header COOP/COEP; service worker này thêm vào để ONNX Runtime chạy đa luồng -->
+<script src="coi-serviceworker.min.js"></script>
 <style>
   :root {
     --bg: #0f1214; --panel: #171c1f; --line: #2a3237; --fg: #e8eef0; --muted: #8b989e;
@@ -39,7 +41,7 @@
     padding: calc(var(--sat) + 10px) max(12px, var(--sar)) 24px max(12px, var(--sal));
     background: linear-gradient(var(--scrim), transparent);
   }
-  .topbar h1 { flex: 1; margin: 0; font-size: 15px; font-weight: 600; text-shadow: 0 1px 2px #000; }
+  .topbar h1 { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; font-size: 15px; font-weight: 600; text-shadow: 0 1px 2px #000; }
   .chip {
     height: 40px; min-width: 40px; padding: 0 12px; border-radius: 20px;
     border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.45);
@@ -75,6 +77,8 @@
   .roi.busy .scanline { opacity: 1; animation: scan 1.1s ease-in-out infinite alternate; }
   @keyframes scan { from { top: 8%; } to { top: 92%; } }
   @media (prefers-reduced-motion: reduce) { .roi.busy .scanline { animation: none; } }
+  .boxes { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; transition: opacity .4s; }
+  .boxes.fade { opacity: 0; }
   .hint { position: absolute; left: 0; right: 0; top: calc(100% + 10px); text-align: center; font-size: 13px; color: rgba(255,255,255,.85); text-shadow: 0 1px 2px #000; }
 
   .shutterbar {
@@ -145,17 +149,20 @@
 
     <div class="topbar">
       <h1>Camera OCR</h1>
-      <select id="lang" class="chip" aria-label="Ngôn ngữ">
-        <option value="vie+eng">Việt + Anh</option>
+      <select id="engine" class="chip" aria-label="Bộ nhận dạng">
+        <option value="paddle">PaddleOCR</option>
+        <option value="tesseract">Tesseract</option>
+      </select>
+      <select id="lang" class="chip" aria-label="Ngôn ngữ Tesseract" hidden>
         <option value="eng">English</option>
-        <option value="vie">Tiếng Việt</option>
+        <option value="vie+eng">Việt + Anh</option>
       </select>
       <button class="chip" id="torch" aria-pressed="false" aria-label="Đèn flash" hidden>
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 2h10l-2 7h3l-8 13 1-9H7z"/></svg>
       </button>
     </div>
 
-    <div class="roi" id="roi"><div class="scanline"></div><div class="hint">Đưa dòng chữ vào trong khung</div></div>
+    <div class="roi" id="roi"><canvas class="boxes" id="boxes"></canvas><div class="scanline"></div><div class="hint">Đưa dòng chữ vào trong khung</div></div>
 
     <div class="shutterbar">
       <button class="chip big left" id="auto" aria-pressed="false" disabled>Tự động</button>
@@ -216,6 +223,78 @@ async function getWorker(lang) {
   return worker;
 }
 
+// PaddleOCR: tải ONNX Runtime + mô hình khi chọn lần đầu (~30 MB, trình duyệt cache lại)
+let paddle = null;
+function getPaddle() {
+  paddle ??= (async () => {
+    const base = new URL('.', location.href).href;
+    const [ort, { createPaddleOCR }] = await Promise.all([import(base + 'ort/ort.wasm.min.mjs'), import(base + 'paddle.js')]);
+    ort.env.wasm.wasmPaths = base + 'ort/';
+    // GitHub Pages không bật cross-origin isolation nên không chạy đa luồng được
+    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
+    const loaded = {};
+    const load = async (name, as) => {
+      const res = await fetch(base + 'models/' + name);
+      if (!res.ok) throw new Error(`Không tải được ${name} (HTTP ${res.status})`);
+      if (as === 'text') return res.text();
+      // Đọc theo luồng để hiện % tải
+      const total = Number(res.headers.get('content-length')) || 0, reader = res.body.getReader(), parts = [];
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value); got += value.length; loaded[name] = [got, total];
+        const [g, t] = Object.values(loaded).reduce((a, [x, y]) => [a[0] + x, a[1] + y], [0, 0]);
+        if (t) { bar.style.width = Math.round((g / t) * 100) + '%'; setStatus(`Đang tải PaddleOCR ${(g / 1e6).toFixed(1)}/${(t / 1e6).toFixed(1)} MB`); }
+      }
+      const buf = new Uint8Array(got);
+      let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+      return buf;
+    };
+    setStatus('Đang tải PaddleOCR…');
+    const ocr = await createPaddleOCR({
+      ort, load,
+      det: 'ch_PP-OCRv4_det_infer.onnx', rec: 'ch_PP-OCRv4_rec_infer.onnx', dict: 'ppocr_keys_v1.txt',
+      allow: /^[\x20-\x7E°±µΩ×]$/, // tem tiếng Anh: chỉ nhận chữ Latin, số và ký hiệu
+    });
+    setStatus('Sẵn sàng, bấm nút tròn để đọc');
+    return ocr;
+  })().catch((e) => { paddle = null; throw e; });
+  return paddle;
+}
+
+const engine = () => $('engine').value;
+function prepareEngine() {
+  $('lang').hidden = engine() !== 'tesseract';
+  const p = engine() === 'paddle' ? getPaddle() : getWorker($('lang').value);
+  return p.catch((e) => setStatus('Lỗi tải ' + engine() + ': ' + (e.message || e), 'err'));
+}
+
+// Khoanh các vùng chữ Paddle tìm được lên khung ngắm, mờ dần sau 1,5 giây
+let boxTimer;
+function drawBoxes(items, srcW, srcH) {
+  const cv = $('boxes'), r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  const ctx = cv.getContext('2d'), kx = cv.width / srcW, ky = cv.height / srcH;
+  ctx.lineWidth = 2 * dpr; ctx.strokeStyle = '#5fd39a'; ctx.fillStyle = 'rgba(95,211,154,.15)';
+  for (const it of items) {
+    const x = it.x0 * kx, y = it.y0 * ky, w = (it.x1 - it.x0) * kx, h = (it.y1 - it.y0) * ky;
+    ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
+  }
+  cv.classList.remove('fade');
+  clearTimeout(boxTimer); boxTimer = setTimeout(() => cv.classList.add('fade'), 1500);
+}
+
+// Ảnh chọn từ thư viện/camera hệ thống -> canvas (giới hạn 1600px cho nhanh)
+async function fileToCanvas(file) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return c;
+}
+
 async function startCamera() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   if (!navigator.mediaDevices?.getUserMedia) throw new Error(window.isSecureContext ? 'Trình duyệt không hỗ trợ camera' : 'Trang phải mở qua HTTPS');
@@ -237,8 +316,8 @@ async function keepAwake() {
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && stream) keepAwake(); });
 
-// Cắt đúng vùng khung theo tỉ lệ hiển thị (video dùng object-fit: cover), chuyển xám và tăng tương phản.
-function grabRoi() {
+// Cắt đúng vùng khung theo tỉ lệ hiển thị (video dùng object-fit: cover); cho Tesseract thì chuyển xám và tăng tương phản.
+function grabRoi(gray = true) {
   const vw = video.videoWidth, vh = video.videoHeight;
   const box = video.getBoundingClientRect(), roi = $('roi').getBoundingClientRect();
   const scale = Math.max(box.width / vw, box.height / vh);
@@ -254,6 +333,7 @@ function grabRoi() {
   c.width = Math.round(sw * k); c.height = Math.round(sh * k);
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  if (!gray) return c; // PaddleOCR được huấn luyện trên ảnh màu, không cần xử lý thêm
   const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
   for (let i = 0; i < d.length; i += 4) {
     const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
@@ -264,22 +344,34 @@ function grabRoi() {
   return c;
 }
 
-async function recognize(source) {
+async function recognize(source, fromRoi = true) {
   if (busy) return;
   busy = true; $('roi').classList.add('busy'); $('snap').classList.add('busy');
   try {
-    const w = await getWorker($('lang').value);
-    setStatus('Đang đọc…');
-    const t0 = performance.now();
-    const { data } = await w.recognize(source);
-    const text = data.text.trim();
-    const ms = Math.round(performance.now() - t0);
+    let text, confidence, detail = '';
+    if (engine() === 'paddle') {
+      const ocr = await getPaddle();
+      setStatus('Paddle đang đọc…');
+      const img = source.getContext('2d').getImageData(0, 0, source.width, source.height);
+      const r = await ocr.recognize(img);
+      ({ text, confidence } = r);
+      detail = ` · tìm ${r.timing.det} + đọc ${r.timing.rec} ms`;
+      if (fromRoi) drawBoxes(r.items, source.width, source.height);
+    } else {
+      const w = await getWorker($('lang').value);
+      setStatus('Tesseract đang đọc…');
+      const t0 = performance.now();
+      const { data } = await w.recognize(source);
+      ({ text, confidence } = data);
+      detail = ` · ${Math.round(performance.now() - t0)} ms`;
+    }
+    text = text.trim();
     if (text) {
       $('out').value = text;
-      setStatus(`Độ tin cậy ${Math.round(data.confidence)}% · ${ms} ms`, 'ok');
+      setStatus(`${Math.round(confidence)}%${detail}`, 'ok');
       navigator.vibrate?.(30);
     } else {
-      setStatus(`Không thấy chữ trong khung · ${ms} ms`);
+      setStatus(`Không thấy chữ trong khung${detail}`);
     }
   } catch (e) {
     setStatus('Lỗi: ' + (e.message || e), 'err');
@@ -288,7 +380,7 @@ async function recognize(source) {
   }
 }
 
-const snap = () => { if (video.videoWidth) recognize(grabRoi()); };
+const snap = () => { if (video.videoWidth) recognize(grabRoi(engine() === 'tesseract')); };
 $('snap').onclick = () => (video.videoWidth ? snap() : toast('Camera chưa sẵn sàng'));
 
 $('auto').onclick = () => {
@@ -312,7 +404,13 @@ $('torch').onclick = async () => {
   } catch { toast('Máy này không bật được đèn từ trình duyệt'); }
 };
 
-$('lang').onchange = () => getWorker($('lang').value).catch((e) => setStatus('Lỗi: ' + e.message, 'err'));
+$('lang').onchange = () => prepareEngine();
+
+$('engine').onchange = () => {
+  try { localStorage.setItem('ocr-engine', engine()); } catch {}
+  prepareEngine();
+};
+try { const saved = localStorage.getItem('ocr-engine'); if (saved) $('engine').value = saved; } catch {}
 
 $('copy').onclick = async () => {
   if (!$('out').value) return toast('Chưa có chữ để sao chép');
@@ -333,7 +431,7 @@ $('grip').addEventListener('touchend', (e) => {
   if (Math.abs(dy) > 30) { e.preventDefault(); $('sheet').classList.toggle('expanded', dy < 0); }
 });
 
-$('file').onchange = (e) => { const f = e.target.files[0]; if (f) recognize(f); };
+$('file').onchange = async (e) => { const f = e.target.files[0]; if (f) recognize(await fileToCanvas(f), false); };
 
 (async () => {
   try {
@@ -346,7 +444,7 @@ $('file').onchange = (e) => { const f = e.target.files[0]; if (f) recognize(f); 
     ['roi', 'video'].forEach((id) => ($(id).hidden = true));
     document.querySelector('.shutterbar').hidden = true;
   }
-  try { await getWorker($('lang').value); } catch (e) { setStatus('Lỗi tải Tesseract: ' + e.message, 'err'); }
+  prepareEngine();
 })();
 </script>
 </body>

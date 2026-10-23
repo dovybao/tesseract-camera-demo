@@ -13,7 +13,12 @@
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
     "@tesseract.js-data/vie": "^1.0.0",
+    "coi-serviceworker": "^0.1.7",
+    "onnxruntime-web": "^1.30.0",
     "tesseract.js": "^6.0.1"
   },
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "pngjs": "^7.0.0"
+  }
 }

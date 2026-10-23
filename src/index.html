@@ -2,102 +2,204 @@
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Camera OCR</title>
 <style>
   :root {
-    --bg: #0f1214; --panel: #181d20; --line: #2a3237; --fg: #e8eef0; --muted: #8b989e;
-    --accent: #ffb547; --ok: #5fd39a; --err: #ff6b6b;
+    --bg: #0f1214; --panel: #171c1f; --line: #2a3237; --fg: #e8eef0; --muted: #8b989e;
+    --accent: #ffb547; --ok: #5fd39a; --err: #ff6b6b; --scrim: rgba(0,0,0,.5);
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px);
     color-scheme: dark;
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; }
   body {
     background: var(--bg); color: var(--fg);
     font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    display: flex; flex-direction: column;
-    padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(12px, env(safe-area-inset-left));
+    display: flex; flex-direction: column; height: 100dvh;
+    user-select: none; -webkit-user-select: none;
   }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-block: 10px; }
-  h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
-  select, button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-  button { cursor: pointer; }
+  button, select { font: inherit; color: var(--fg); cursor: pointer; touch-action: manipulation; }
   button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .4; }
 
-  .stage { position: relative; width: 100%; max-width: 640px; margin: 0 auto; aspect-ratio: 3 / 4; max-height: 55vh; background: #000; border-radius: 12px; overflow: hidden; }
-  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* ---------- Camera: chiếm phần trên màn hình, mọi nút đè lên trên ---------- */
+  .stage { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; }
+  video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+  .topbar {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: center; gap: 8px;
+    padding: calc(var(--sat) + 10px) max(12px, var(--sar)) 24px max(12px, var(--sal));
+    background: linear-gradient(var(--scrim), transparent);
+  }
+  .topbar h1 { flex: 1; margin: 0; font-size: 15px; font-weight: 600; text-shadow: 0 1px 2px #000; }
+  .chip {
+    height: 40px; min-width: 40px; padding: 0 12px; border-radius: 20px;
+    border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.45);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  select.chip { appearance: none; -webkit-appearance: none; padding-right: 28px; background-image: linear-gradient(45deg, transparent 50%, var(--fg) 50%), linear-gradient(135deg, var(--fg) 50%, transparent 50%); background-position: right 14px center, right 9px center; background-size: 5px 5px; background-repeat: no-repeat; background-color: rgba(0,0,0,.45); }
+  .chip[aria-pressed="true"] { background-color: var(--accent); color: #1a1205; border-color: var(--accent); }
+  .chip svg { width: 20px; height: 20px; }
+
   /* Vùng quét: chỉ phần trong khung được đưa vào OCR */
-  .roi { position: absolute; left: 8%; right: 8%; top: 35%; height: 30%; border: 2px solid var(--accent); border-radius: 8px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.45); pointer-events: none; }
-  .roi.busy { border-style: dashed; }
-  .hint { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; color: var(--muted); font-size: 12px; }
+  .roi {
+    position: absolute; left: 7%; right: 7%; top: 50%; height: 26%; transform: translateY(-55%);
+    border-radius: 14px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.42); pointer-events: none;
+  }
+  .roi::before, .roi::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+  .roi::before { border: 2px solid rgba(255,255,255,.25); }
+  /* góc khung kiểu ống ngắm */
+  .roi::after {
+    --c: var(--accent); --l: 26px; --w: 4px;
+    background:
+      linear-gradient(var(--c), var(--c)) top left / var(--l) var(--w),
+      linear-gradient(var(--c), var(--c)) top left / var(--w) var(--l),
+      linear-gradient(var(--c), var(--c)) top right / var(--l) var(--w),
+      linear-gradient(var(--c), var(--c)) top right / var(--w) var(--l),
+      linear-gradient(var(--c), var(--c)) bottom left / var(--l) var(--w),
+      linear-gradient(var(--c), var(--c)) bottom left / var(--w) var(--l),
+      linear-gradient(var(--c), var(--c)) bottom right / var(--l) var(--w),
+      linear-gradient(var(--c), var(--c)) bottom right / var(--w) var(--l);
+    background-repeat: no-repeat;
+  }
+  .scanline { position: absolute; left: 4%; right: 4%; height: 2px; top: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); opacity: 0; }
+  .roi.busy .scanline { opacity: 1; animation: scan 1.1s ease-in-out infinite alternate; }
+  @keyframes scan { from { top: 8%; } to { top: 92%; } }
+  @media (prefers-reduced-motion: reduce) { .roi.busy .scanline { animation: none; } }
+  .hint { position: absolute; left: 0; right: 0; top: calc(100% + 10px); text-align: center; font-size: 13px; color: rgba(255,255,255,.85); text-shadow: 0 1px 2px #000; }
 
-  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding-block: 12px; }
-  .primary { background: var(--accent); color: #1a1205; border-color: var(--accent); font-weight: 600; min-width: 140px; }
-  .toggle[aria-pressed="true"] { border-color: var(--ok); color: var(--ok); }
+  .shutterbar {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 2;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px;
+    padding: 28px max(20px, var(--sar)) 16px max(20px, var(--sal));
+    background: linear-gradient(transparent, var(--scrim));
+  }
+  .shutterbar .left { justify-self: start; } .shutterbar .right { justify-self: end; }
+  .shutter {
+    width: 76px; height: 76px; border-radius: 50%; padding: 0;
+    border: 4px solid #fff; background: transparent; display: grid; place-items: center;
+  }
+  .shutter::after { content: ""; width: 60px; height: 60px; border-radius: 50%; background: var(--accent); transition: transform .12s; }
+  .shutter:active::after { transform: scale(.88); }
+  .shutter.busy::after { animation: pulse .9s ease-in-out infinite; }
+  @keyframes pulse { 50% { transform: scale(.8); opacity: .6; } }
+  .chip.big { height: 48px; min-width: 48px; border-radius: 24px; font-size: 14px; }
 
-  .status { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: center; min-height: 1.4em; }
-  .status.err { color: var(--err); }
-  .bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; max-width: 640px; margin: 6px auto 0; width: 100%; }
+  /* ---------- Ô kết quả: nửa dưới, kéo/chạm để mở rộng ---------- */
+  .sheet {
+    flex: 0 0 auto; height: 34dvh; min-height: 170px; display: flex; flex-direction: column;
+    background: var(--panel); border-top: 1px solid var(--line); border-radius: 16px 16px 0 0; margin-top: -16px; z-index: 3;
+    padding-bottom: var(--sab); transition: height .25s ease;
+  }
+  .sheet.expanded { height: 72dvh; }
+  .grip { align-self: center; width: 44px; height: 5px; border-radius: 3px; background: var(--line); margin: 8px 0 2px; border: 0; padding: 0; }
+  .grip-hit { display: flex; justify-content: center; background: none; border: 0; padding: 0 0 4px; width: 100%; }
+  .sheet-head { display: flex; align-items: center; gap: 8px; padding: 2px max(14px, var(--sar)) 8px max(14px, var(--sal)); }
+  .status { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .status.err { color: var(--err); } .status.ok { color: var(--ok); }
+  .btn { height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
+  .bar { height: 2px; background: var(--line); margin: 0 max(14px, var(--sar)) 0 max(14px, var(--sal)); border-radius: 1px; overflow: hidden; }
   .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  textarea {
+    flex: 1; min-height: 0; width: 100%; resize: none; border: 0; outline: none; background: transparent; color: var(--fg);
+    /* 16px để iOS/Android không tự zoom khi chạm vào */
+    font: 16px/1.55 var(--mono); padding: 12px max(14px, var(--sar)) 12px max(14px, var(--sal));
+    user-select: text; -webkit-user-select: text;
+  }
+  textarea::placeholder { color: var(--muted); }
 
-  .result { flex: 1; min-height: 120px; max-width: 640px; width: 100%; margin: 10px auto 12px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
-  .result-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
-  .result-head button { padding: 4px 10px; font-size: 12px; }
-  textarea { flex: 1; min-height: 100px; resize: none; border: 0; background: transparent; color: var(--fg); font: 15px/1.5 var(--mono); padding: 12px; }
-  .conf { font-variant-numeric: tabular-nums; }
-  .fallback { display: none; text-align: center; padding: 12px; color: var(--muted); }
-  .fallback.show { display: block; }
+  .toast {
+    position: fixed; left: 50%; bottom: calc(34dvh + 16px); transform: translate(-50%, 8px); z-index: 10;
+    background: var(--fg); color: var(--bg); padding: 8px 14px; border-radius: 18px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  .fallback { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; color: var(--muted); }
+  .fallback.show { display: flex; }
+  .fallback .btn { height: 48px; background: var(--accent); color: #1a1205; border: 0; font-weight: 600; }
+
+  /* Điện thoại xoay ngang: camera bên trái, kết quả bên phải */
+  @media (orientation: landscape) and (max-height: 540px) {
+    body { flex-direction: row; }
+    .sheet, .sheet.expanded { height: auto; width: 40vw; min-height: 0; margin: 0; border-radius: 0; border-top: 0; border-left: 1px solid var(--line); padding-top: var(--sat); }
+    .grip-hit { display: none; }
+    .shutterbar { padding-bottom: calc(var(--sab) + 10px); }
+    .roi { height: 34%; }
+    .toast { bottom: 24px; left: 30vw; }
+  }
 </style>
 </head>
 <body>
-  <header>
-    <h1>Camera OCR · Tesseract.js</h1>
-    <select id="lang" aria-label="Ngôn ngữ">
-      <option value="vie+eng">Việt + Anh</option>
-      <option value="eng">English</option>
-      <option value="vie">Tiếng Việt</option>
-    </select>
-  </header>
-
-  <div class="stage">
+  <main class="stage" id="stage">
     <video id="video" playsinline muted autoplay></video>
-    <div class="roi" id="roi"></div>
-    <div class="hint">Đưa dòng chữ vào trong khung vàng</div>
-  </div>
 
-  <div class="fallback" id="fallback">
-    Không mở được camera trực tiếp (<span id="why"></span>).<br>
-    <label><button type="button" onclick="document.getElementById('file').click()">Chụp ảnh bằng camera</button></label>
-    <input type="file" id="file" accept="image/*" capture="environment" hidden>
-  </div>
-
-  <div class="controls">
-    <button class="primary" id="snap" disabled>Chụp &amp; đọc</button>
-    <button class="toggle" id="auto" aria-pressed="false" disabled>Quét liên tục</button>
-    <button id="flip" disabled>Đổi camera</button>
-  </div>
-
-  <div class="status" id="status">Đang khởi động…</div>
-  <div class="bar"><i id="progress"></i></div>
-
-  <section class="result">
-    <div class="result-head">
-      <span>Kết quả <span class="conf" id="conf"></span></span>
-      <button id="copy">Sao chép</button>
+    <div class="topbar">
+      <h1>Camera OCR</h1>
+      <select id="lang" class="chip" aria-label="Ngôn ngữ">
+        <option value="vie+eng">Việt + Anh</option>
+        <option value="eng">English</option>
+        <option value="vie">Tiếng Việt</option>
+      </select>
+      <button class="chip" id="torch" aria-pressed="false" aria-label="Đèn flash" hidden>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 2h10l-2 7h3l-8 13 1-9H7z"/></svg>
+      </button>
     </div>
-    <textarea id="out" placeholder="Văn bản nhận dạng sẽ hiện ở đây" spellcheck="false"></textarea>
+
+    <div class="roi" id="roi"><div class="scanline"></div><div class="hint">Đưa dòng chữ vào trong khung</div></div>
+
+    <div class="shutterbar">
+      <button class="chip big left" id="auto" aria-pressed="false" disabled>Tự động</button>
+      <button class="shutter" id="snap" aria-label="Chụp và đọc chữ" disabled></button>
+      <button class="chip big right" id="flip" aria-label="Đổi camera" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3l-2-3H9L7 7H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/><path d="M9 13a3 3 0 0 1 5-2.2M15 13a3 3 0 0 1-5 2.2"/><path d="M14 9v2h-2M10 17v-2h2"/></svg>
+      </button>
+    </div>
+
+    <div class="fallback" id="fallback">
+      <div>Không mở được camera trực tiếp<br><small id="why"></small></div>
+      <button class="btn" type="button" onclick="document.getElementById('file').click()">Chụp ảnh để đọc chữ</button>
+      <input type="file" id="file" accept="image/*" capture="environment" hidden>
+    </div>
+  </main>
+
+  <section class="sheet" id="sheet">
+    <button class="grip-hit" id="grip" aria-label="Mở rộng khung kết quả"><span class="grip"></span></button>
+    <div class="sheet-head">
+      <span class="status" id="status">Đang khởi động…</span>
+      <button class="btn" id="clear">Xóa</button>
+      <button class="btn" id="copy">Sao chép</button>
+    </div>
+    <div class="bar"><i id="progress"></i></div>
+    <textarea id="out" placeholder="Bấm nút tròn để đọc chữ trong khung. Kết quả hiện ở đây." spellcheck="false"></textarea>
   </section>
+
+  <div class="toast" id="toast" role="status"></div>
 
 <script src="tesseract.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const video = $('video'), statusEl = $('status'), bar = $('progress');
-let worker = null, workerLang = null, stream = null, facing = 'environment', busy = false, autoTimer = null;
+let worker = null, workerLang = null, stream = null, facing = 'environment', busy = false, autoTimer = null, wakeLock = null;
 
-function setStatus(msg, isErr = false) { statusEl.textContent = msg; statusEl.classList.toggle('err', isErr); }
+function setStatus(msg, kind = '') { statusEl.textContent = msg; statusEl.className = 'status ' + kind; }
 
-// Mọi file runtime được phục vụ từ chính máy dev, điện thoại không cần internet.
+let toastTimer;
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1600);
+}
+
+// Mọi file runtime được phục vụ cùng trang, không phụ thuộc CDN.
 async function getWorker(lang) {
   if (worker && workerLang === lang) return worker;
   if (worker) await worker.terminate();
@@ -107,35 +209,44 @@ async function getWorker(lang) {
     workerPath: base + 'worker.min.js',
     corePath: base + 'core/',
     langPath: base + 'lang',
-    logger: (m) => {
-      if (typeof m.progress === 'number') bar.style.width = Math.round(m.progress * 100) + '%';
-      if (m.status && m.status !== 'recognizing text') setStatus(m.status);
-    },
+    logger: (m) => { if (typeof m.progress === 'number') bar.style.width = Math.round(m.progress * 100) + '%'; },
   });
   workerLang = lang;
-  setStatus('Sẵn sàng');
+  setStatus('Sẵn sàng, bấm nút tròn để đọc');
   return worker;
 }
 
 async function startCamera() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
-  if (!navigator.mediaDevices?.getUserMedia) throw new Error(window.isSecureContext ? 'trình duyệt không hỗ trợ getUserMedia' : 'trang không chạy qua HTTPS');
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error(window.isSecureContext ? 'Trình duyệt không hỗ trợ camera' : 'Trang phải mở qua HTTPS');
   stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } },
     audio: false,
   });
   video.srcObject = stream;
+  video.style.transform = facing === 'user' ? 'scaleX(-1)' : '';
   await video.play();
+  // Đèn flash chỉ có trên camera sau của một số máy Android
+  const caps = stream.getVideoTracks()[0].getCapabilities?.() || {};
+  $('torch').hidden = !caps.torch;
+  $('torch').setAttribute('aria-pressed', 'false');
 }
 
-// Cắt đúng vùng khung vàng theo tỉ lệ hiển thị (video dùng object-fit: cover), chuyển xám và tăng tương phản.
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && stream) keepAwake(); });
+
+// Cắt đúng vùng khung theo tỉ lệ hiển thị (video dùng object-fit: cover), chuyển xám và tăng tương phản.
 function grabRoi() {
   const vw = video.videoWidth, vh = video.videoHeight;
   const box = video.getBoundingClientRect(), roi = $('roi').getBoundingClientRect();
   const scale = Math.max(box.width / vw, box.height / vh);
   const offX = (vw * scale - box.width) / 2, offY = (vh * scale - box.height) / 2;
-  const sx = (roi.left - box.left + offX) / scale, sy = (roi.top - box.top + offY) / scale;
+  let sx = (roi.left - box.left + offX) / scale;
+  const sy = (roi.top - box.top + offY) / scale;
   const sw = roi.width / scale, sh = roi.height / scale;
+  if (facing === 'user') sx = vw - sx - sw; // camera trước đang hiển thị lật gương
 
   const up = sw < 1000 ? 2 : 1;
   const c = document.createElement('canvas');
@@ -154,22 +265,25 @@ function grabRoi() {
 
 async function recognize(source) {
   if (busy) return;
-  busy = true; $('roi').classList.add('busy'); $('snap').disabled = true;
+  busy = true; $('roi').classList.add('busy'); $('snap').classList.add('busy');
   try {
     const w = await getWorker($('lang').value);
-    setStatus('Đang nhận dạng…');
+    setStatus('Đang đọc…');
     const t0 = performance.now();
     const { data } = await w.recognize(source);
     const text = data.text.trim();
+    const ms = Math.round(performance.now() - t0);
     if (text) {
       $('out').value = text;
-      $('conf').textContent = `· độ tin cậy ${Math.round(data.confidence)}%`;
+      setStatus(`Độ tin cậy ${Math.round(data.confidence)}% · ${ms} ms`, 'ok');
+      navigator.vibrate?.(30);
+    } else {
+      setStatus(`Không thấy chữ trong khung · ${ms} ms`);
     }
-    setStatus(`${text ? 'Xong' : 'Không thấy chữ'} trong ${Math.round(performance.now() - t0)} ms`);
   } catch (e) {
-    setStatus('Lỗi: ' + (e.message || e), true);
+    setStatus('Lỗi: ' + (e.message || e), 'err');
   } finally {
-    busy = false; $('roi').classList.remove('busy'); $('snap').disabled = false;
+    busy = false; $('roi').classList.remove('busy'); $('snap').classList.remove('busy');
   }
 }
 
@@ -179,20 +293,43 @@ $('auto').onclick = () => {
   const on = $('auto').getAttribute('aria-pressed') !== 'true';
   $('auto').setAttribute('aria-pressed', on);
   clearInterval(autoTimer);
-  if (on) autoTimer = setInterval(() => { if (!busy) recognize(grabRoi()); }, 1200);
+  if (on) { autoTimer = setInterval(() => { if (!busy) recognize(grabRoi()); }, 1200); toast('Đang quét liên tục'); }
+  else toast('Đã tắt quét liên tục');
 };
 
 $('flip').onclick = async () => {
   facing = facing === 'environment' ? 'user' : 'environment';
-  try { await startCamera(); } catch (e) { setStatus('Lỗi camera: ' + e.message, true); }
+  try { await startCamera(); } catch (e) { setStatus('Lỗi camera: ' + e.message, 'err'); }
 };
 
-$('lang').onchange = () => getWorker($('lang').value).catch((e) => setStatus('Lỗi: ' + e.message, true));
+$('torch').onclick = async () => {
+  const on = $('torch').getAttribute('aria-pressed') !== 'true';
+  try {
+    await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ torch: on }] });
+    $('torch').setAttribute('aria-pressed', on);
+  } catch { toast('Máy này không bật được đèn từ trình duyệt'); }
+};
+
+$('lang').onchange = () => getWorker($('lang').value).catch((e) => setStatus('Lỗi: ' + e.message, 'err'));
 
 $('copy').onclick = async () => {
-  try { await navigator.clipboard.writeText($('out').value); setStatus('Đã sao chép'); }
-  catch { $('out').select(); setStatus('Chọn sẵn văn bản, hãy bấm Copy'); }
+  if (!$('out').value) return toast('Chưa có chữ để sao chép');
+  try { await navigator.clipboard.writeText($('out').value); toast('Đã sao chép'); }
+  catch { $('out').select(); toast('Đã chọn sẵn, hãy bấm Copy'); }
 };
+
+$('clear').onclick = () => { $('out').value = ''; setStatus('Đã xóa'); };
+
+$('grip').onclick = () => $('sheet').classList.toggle('expanded');
+
+// Vuốt lên/xuống trên thanh kéo để mở rộng/thu nhỏ ô kết quả
+let touchY = null;
+$('grip').addEventListener('touchstart', (e) => { touchY = e.touches[0].clientY; }, { passive: true });
+$('grip').addEventListener('touchend', (e) => {
+  if (touchY === null) return;
+  const dy = e.changedTouches[0].clientY - touchY; touchY = null;
+  if (Math.abs(dy) > 30) { e.preventDefault(); $('sheet').classList.toggle('expanded', dy < 0); }
+});
 
 $('file').onchange = (e) => { const f = e.target.files[0]; if (f) recognize(f); };
 
@@ -200,12 +337,14 @@ $('file').onchange = (e) => { const f = e.target.files[0]; if (f) recognize(f); 
   try {
     await startCamera();
     ['snap', 'auto', 'flip'].forEach((id) => ($(id).disabled = false));
+    keepAwake();
   } catch (e) {
     $('why').textContent = e.message || e.name;
     $('fallback').classList.add('show');
-    document.querySelector('.stage').style.display = 'none';
+    ['roi', 'video'].forEach((id) => ($(id).hidden = true));
+    document.querySelector('.shutterbar').hidden = true;
   }
-  try { await getWorker($('lang').value); } catch (e) { setStatus('Lỗi tải Tesseract: ' + e.message, true); }
+  try { await getWorker($('lang').value); } catch (e) { setStatus('Lỗi tải Tesseract: ' + e.message, 'err'); }
 })();
 </script>
 </body>

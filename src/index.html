@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Camera OCR</title>
+<style>
+  :root {
+    --bg: #0f1214; --panel: #181d20; --line: #2a3237; --fg: #e8eef0; --muted: #8b989e;
+    --accent: #ffb547; --ok: #5fd39a; --err: #ff6b6b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(12px, env(safe-area-inset-left));
+  }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-block: 10px; }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  select, button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  button { cursor: pointer; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .stage { position: relative; width: 100%; max-width: 640px; margin: 0 auto; aspect-ratio: 3 / 4; max-height: 55vh; background: #000; border-radius: 12px; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* Vùng quét: chỉ phần trong khung được đưa vào OCR */
+  .roi { position: absolute; left: 8%; right: 8%; top: 35%; height: 30%; border: 2px solid var(--accent); border-radius: 8px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.45); pointer-events: none; }
+  .roi.busy { border-style: dashed; }
+  .hint { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; color: var(--muted); font-size: 12px; }
+
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding-block: 12px; }
+  .primary { background: var(--accent); color: #1a1205; border-color: var(--accent); font-weight: 600; min-width: 140px; }
+  .toggle[aria-pressed="true"] { border-color: var(--ok); color: var(--ok); }
+
+  .status { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: center; min-height: 1.4em; }
+  .status.err { color: var(--err); }
+  .bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; max-width: 640px; margin: 6px auto 0; width: 100%; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+  .result { flex: 1; min-height: 120px; max-width: 640px; width: 100%; margin: 10px auto 12px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+  .result-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .result-head button { padding: 4px 10px; font-size: 12px; }
+  textarea { flex: 1; min-height: 100px; resize: none; border: 0; background: transparent; color: var(--fg); font: 15px/1.5 var(--mono); padding: 12px; }
+  .conf { font-variant-numeric: tabular-nums; }
+  .fallback { display: none; text-align: center; padding: 12px; color: var(--muted); }
+  .fallback.show { display: block; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Camera OCR · Tesseract.js</h1>
+    <select id="lang" aria-label="Ngôn ngữ">
+      <option value="vie+eng">Việt + Anh</option>
+      <option value="eng">English</option>
+      <option value="vie">Tiếng Việt</option>
+    </select>
+  </header>
+
+  <div class="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <div class="roi" id="roi"></div>
+    <div class="hint">Đưa dòng chữ vào trong khung vàng</div>
+  </div>
+
+  <div class="fallback" id="fallback">
+    Không mở được camera trực tiếp (<span id="why"></span>).<br>
+    <label><button type="button" onclick="document.getElementById('file').click()">Chụp ảnh bằng camera</button></label>
+    <input type="file" id="file" accept="image/*" capture="environment" hidden>
+  </div>
+
+  <div class="controls">
+    <button class="primary" id="snap" disabled>Chụp &amp; đọc</button>
+    <button class="toggle" id="auto" aria-pressed="false" disabled>Quét liên tục</button>
+    <button id="flip" disabled>Đổi camera</button>
+  </div>
+
+  <div class="status" id="status">Đang khởi động…</div>
+  <div class="bar"><i id="progress"></i></div>
+
+  <section class="result">
+    <div class="result-head">
+      <span>Kết quả <span class="conf" id="conf"></span></span>
+      <button id="copy">Sao chép</button>
+    </div>
+    <textarea id="out" placeholder="Văn bản nhận dạng sẽ hiện ở đây" spellcheck="false"></textarea>
+  </section>
+
+<script src="tesseract.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const video = $('video'), statusEl = $('status'), bar = $('progress');
+let worker = null, workerLang = null, stream = null, facing = 'environment', busy = false, autoTimer = null;
+
+function setStatus(msg, isErr = false) { statusEl.textContent = msg; statusEl.classList.toggle('err', isErr); }
+
+// Mọi file runtime được phục vụ từ chính máy dev, điện thoại không cần internet.
+async function getWorker(lang) {
+  if (worker && workerLang === lang) return worker;
+  if (worker) await worker.terminate();
+  setStatus(`Đang tải mô hình ${lang}…`);
+  const base = new URL('.', location.href).href;
+  worker = await Tesseract.createWorker(lang.split('+'), 1, {
+    workerPath: base + 'worker.min.js',
+    corePath: base + 'core/',
+    langPath: base + 'lang',
+    logger: (m) => {
+      if (typeof m.progress === 'number') bar.style.width = Math.round(m.progress * 100) + '%';
+      if (m.status && m.status !== 'recognizing text') setStatus(m.status);
+    },
+  });
+  workerLang = lang;
+  setStatus('Sẵn sàng');
+  return worker;
+}
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error(window.isSecureContext ? 'trình duyệt không hỗ trợ getUserMedia' : 'trang không chạy qua HTTPS');
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+// Cắt đúng vùng khung vàng theo tỉ lệ hiển thị (video dùng object-fit: cover), chuyển xám và tăng tương phản.
+function grabRoi() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const box = video.getBoundingClientRect(), roi = $('roi').getBoundingClientRect();
+  const scale = Math.max(box.width / vw, box.height / vh);
+  const offX = (vw * scale - box.width) / 2, offY = (vh * scale - box.height) / 2;
+  const sx = (roi.left - box.left + offX) / scale, sy = (roi.top - box.top + offY) / scale;
+  const sw = roi.width / scale, sh = roi.height / scale;
+
+  const up = sw < 1000 ? 2 : 1;
+  const c = document.createElement('canvas');
+  c.width = Math.round(sw * up); c.height = Math.round(sh * up);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  const img = ctx.getImageData(0, 0, c.width, c.height), d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const v = Math.max(0, Math.min(255, (g - 128) * 1.4 + 128));
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+async function recognize(source) {
+  if (busy) return;
+  busy = true; $('roi').classList.add('busy'); $('snap').disabled = true;
+  try {
+    const w = await getWorker($('lang').value);
+    setStatus('Đang nhận dạng…');
+    const t0 = performance.now();
+    const { data } = await w.recognize(source);
+    const text = data.text.trim();
+    if (text) {
+      $('out').value = text;
+      $('conf').textContent = `· độ tin cậy ${Math.round(data.confidence)}%`;
+    }
+    setStatus(`${text ? 'Xong' : 'Không thấy chữ'} trong ${Math.round(performance.now() - t0)} ms`);
+  } catch (e) {
+    setStatus('Lỗi: ' + (e.message || e), true);
+  } finally {
+    busy = false; $('roi').classList.remove('busy'); $('snap').disabled = false;
+  }
+}
+
+$('snap').onclick = () => recognize(grabRoi());
+
+$('auto').onclick = () => {
+  const on = $('auto').getAttribute('aria-pressed') !== 'true';
+  $('auto').setAttribute('aria-pressed', on);
+  clearInterval(autoTimer);
+  if (on) autoTimer = setInterval(() => { if (!busy) recognize(grabRoi()); }, 1200);
+};
+
+$('flip').onclick = async () => {
+  facing = facing === 'environment' ? 'user' : 'environment';
+  try { await startCamera(); } catch (e) { setStatus('Lỗi camera: ' + e.message, true); }
+};
+
+$('lang').onchange = () => getWorker($('lang').value).catch((e) => setStatus('Lỗi: ' + e.message, true));
+
+$('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('out').value); setStatus('Đã sao chép'); }
+  catch { $('out').select(); setStatus('Chọn sẵn văn bản, hãy bấm Copy'); }
+};
+
+$('file').onchange = (e) => { const f = e.target.files[0]; if (f) recognize(f); };
+
+(async () => {
+  try {
+    await startCamera();
+    ['snap', 'auto', 'flip'].forEach((id) => ($(id).disabled = false));
+  } catch (e) {
+    $('why').textContent = e.message || e.name;
+    $('fallback').classList.add('show');
+    document.querySelector('.stage').style.display = 'none';
+  }
+  try { await getWorker($('lang').value); } catch (e) { setStatus('Lỗi tải Tesseract: ' + e.message, true); }
+})();
+</script>
+</body>
+</html>
